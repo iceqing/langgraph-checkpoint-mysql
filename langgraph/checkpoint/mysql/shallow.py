@@ -15,7 +15,7 @@ from langgraph.checkpoint.base import (
     Checkpoint,
     CheckpointMetadata,
     CheckpointTuple,
-    get_checkpoint_metadata,
+    get_serializable_checkpoint_metadata,
 )
 from langgraph.checkpoint.mysql import _ainternal, _internal
 from langgraph.checkpoint.mysql.base import BaseMySQLSaver
@@ -284,7 +284,7 @@ class BaseShallowSyncMySQLSaver(BaseMySQLSaver, Generic[_internal.C, _internal.R
                 self.MIGRATIONS[version + 1 :],
             ):
                 cur.execute(migration)
-                cur.execute(f"INSERT INTO checkpoint_migrations (v) VALUES ({v})")
+                cur.execute("INSERT INTO checkpoint_migrations (v) VALUES (%s)", (v,))
                 cur.execute("COMMIT")
 
     def list(
@@ -303,10 +303,11 @@ class BaseShallowSyncMySQLSaver(BaseMySQLSaver, Generic[_internal.C, _internal.R
         """
         where, args = self._search_where(config, filter, before)
         query = self.SELECT_SQL + where
-        if limit:
-            query += f" LIMIT {limit}"
+        if limit is not None:
+            query += " LIMIT %(limit)s"
+            args = {**args, "limit": int(limit)}
         with self._cursor() as cur:
-            cur.execute(self.SELECT_SQL + where, args)
+            cur.execute(query, args)
             values = cur.fetchall()
             for value in values:
                 pending_sends = deserialize_pending_sends(value["pending_sends"])
@@ -330,7 +331,7 @@ class BaseShallowSyncMySQLSaver(BaseMySQLSaver, Generic[_internal.C, _internal.R
                         }
                     },
                     checkpoint=checkpoint,
-                    metadata=self._load_metadata(value["metadata"]),
+                    metadata=json.loads(value["metadata"]),
                     pending_writes=self._load_writes(
                         deserialize_pending_writes(value["pending_writes"])
                     ),
@@ -402,7 +403,7 @@ class BaseShallowSyncMySQLSaver(BaseMySQLSaver, Generic[_internal.C, _internal.R
                         }
                     },
                     checkpoint=checkpoint,
-                    metadata=self._load_metadata(value["metadata"]),
+                    metadata=json.loads(value["metadata"]),
                     pending_writes=self._load_writes(
                         deserialize_pending_writes(value["pending_writes"])
                     ),
@@ -481,7 +482,7 @@ class BaseShallowSyncMySQLSaver(BaseMySQLSaver, Generic[_internal.C, _internal.R
                     checkpoint_ns,
                     checkpoint_ns,
                     json.dumps(copy),
-                    self._dump_metadata(get_checkpoint_metadata(config, metadata)),
+                    json.dumps(get_serializable_checkpoint_metadata(config, metadata)),
                 ),
             )
         return next_config
@@ -597,7 +598,9 @@ class BaseShallowAsyncMySQLSaver(BaseMySQLSaver, Generic[_ainternal.C, _ainterna
                 self.MIGRATIONS[version + 1 :],
             ):
                 await cur.execute(migration)
-                await cur.execute(f"INSERT INTO checkpoint_migrations (v) VALUES ({v})")
+                await cur.execute(
+                    "INSERT INTO checkpoint_migrations (v) VALUES (%s)", (v,)
+                )
 
     async def alist(
         self,
@@ -614,10 +617,11 @@ class BaseShallowAsyncMySQLSaver(BaseMySQLSaver, Generic[_ainternal.C, _ainterna
         """
         where, args = self._search_where(config, filter, before)
         query = self.SELECT_SQL + where
-        if limit:
-            query += f" LIMIT {limit}"
+        if limit is not None:
+            query += " LIMIT %(limit)s"
+            args = {**args, "limit": int(limit)}
         async with self._cursor() as cur:
-            await cur.execute(self.SELECT_SQL + where, args)
+            await cur.execute(query, args)
             async for value in cur:
                 pending_sends = deserialize_pending_sends(value["pending_sends"])
                 checkpoint: Checkpoint = {
@@ -640,7 +644,7 @@ class BaseShallowAsyncMySQLSaver(BaseMySQLSaver, Generic[_ainternal.C, _ainterna
                         }
                     },
                     checkpoint=checkpoint,
-                    metadata=self._load_metadata(value["metadata"]),
+                    metadata=json.loads(value["metadata"]),
                     pending_writes=await asyncio.to_thread(
                         self._load_writes,
                         deserialize_pending_writes(value["pending_writes"]),
@@ -689,7 +693,7 @@ class BaseShallowAsyncMySQLSaver(BaseMySQLSaver, Generic[_ainternal.C, _ainterna
                         }
                     },
                     checkpoint=checkpoint,
-                    metadata=self._load_metadata(value["metadata"]),
+                    metadata=json.loads(value["metadata"]),
                     pending_writes=await asyncio.to_thread(
                         self._load_writes,
                         deserialize_pending_writes(value["pending_writes"]),
@@ -756,7 +760,7 @@ class BaseShallowAsyncMySQLSaver(BaseMySQLSaver, Generic[_ainternal.C, _ainterna
                     checkpoint_ns,
                     checkpoint_ns,
                     json.dumps(copy),
-                    self._dump_metadata(get_checkpoint_metadata(config, metadata)),
+                    json.dumps(get_serializable_checkpoint_metadata(config, metadata)),
                 ),
             )
         return next_config

@@ -16,7 +16,7 @@ from langgraph.checkpoint.base import (
     CheckpointMetadata,
     CheckpointTuple,
     get_checkpoint_id,
-    get_checkpoint_metadata,
+    get_serializable_checkpoint_metadata,
 )
 from langgraph.checkpoint.mysql import _internal
 from langgraph.checkpoint.mysql.base import BaseMySQLSaver
@@ -89,7 +89,7 @@ class BaseSyncMySQLSaver(BaseMySQLSaver, Generic[_internal.C, _internal.R]):
                 self.MIGRATIONS[version + 1 :],
             ):
                 cur.execute(migration)
-                cur.execute(f"INSERT INTO checkpoint_migrations (v) VALUES ({v})")
+                cur.execute("INSERT INTO checkpoint_migrations (v) VALUES (%s)", (v,))
                 cur.execute("COMMIT")
 
     def list(
@@ -134,8 +134,9 @@ class BaseSyncMySQLSaver(BaseMySQLSaver, Generic[_internal.C, _internal.R]):
         """
         where, args = self._search_where(config, filter, before)
         query = self._select_sql(where) + " ORDER BY checkpoint_id DESC"
-        if limit:
-            query += f" LIMIT {limit}"
+        if limit is not None:
+            query += " LIMIT %(limit)s"
+            args = {**args, "limit": int(limit)}
         # if we change this to use .stream() we need to make sure to close the cursor
         with self._cursor() as cur:
             cur.execute(query, args)
@@ -338,7 +339,7 @@ class BaseSyncMySQLSaver(BaseMySQLSaver, Generic[_internal.C, _internal.R]):
                     checkpoint["id"],
                     checkpoint_id,
                     json.dumps(copy),
-                    self._dump_metadata(get_checkpoint_metadata(config, metadata)),
+                    json.dumps(get_serializable_checkpoint_metadata(config, metadata)),
                 ),
             )
         return next_config
@@ -425,7 +426,7 @@ class BaseSyncMySQLSaver(BaseMySQLSaver, Generic[_internal.C, _internal.R]):
                     **self._load_blobs(value["channel_values"]),
                 },
             },
-            self._load_metadata(value["metadata"]),
+            json.loads(value["metadata"]),
             (
                 {
                     "configurable": {

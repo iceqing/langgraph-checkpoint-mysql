@@ -4,15 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langgraph-checkpoint-mysql"
-version = "2.0.17"
+version = "3.0.0"
 description = "Library with a MySQL implementation of LangGraph checkpoint saver."
 authors = [{ name = "Theodore Ni", email = "dev@ted.bio" }]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
-  "langgraph-checkpoint>=2.0.21",
+  "langgraph-checkpoint>=2.1.2",
   "orjson>=3.10.1",
   "typing-extensions>=4.12.2",
 ]
@@ -51,7 +51,7 @@ dev = [
 default-groups = ["dev"]
 
 [tool.uv.sources]
-langgraph = { git = "https://github.com/langchain-ai/langgraph", rev = "a15f542a1f235a4b8622f958403971295df5fa8f", subdirectory = "libs/langgraph" }
+langgraph = { git = "https://github.com/langchain-ai/langgraph", rev = "7b9ff6129b35a4f1fddd5b5d78eb0b363605f092", subdirectory = "libs/langgraph" }
 
 [tool.hatch.build.targets.wheel]
 include = ["langgraph"]

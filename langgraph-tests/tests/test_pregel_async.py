@@ -32,6 +32,7 @@ from langgraph.checkpoint.base import (
     BaseCheckpointSaver,
     CheckpointTuple,
 )
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import InvalidUpdateError, ParentCommand
 from langgraph.func import entrypoint, task
 from langgraph.graph import END, START, StateGraph
@@ -6891,4 +6892,149 @@ async def test_fork_and_update_task_results(
                 ],
             ],
         ],
+    ]
+
+
+async def test_fork_does_not_apply_pending_writes(
+    async_checkpointer: BaseCheckpointSaver,
+) -> None:
+    """Test that forking with aupdate_state does not apply pending writes from original execution."""
+
+    class State(TypedDict):
+        value: Annotated[int, operator.add]
+
+    def node_a(state: State) -> State:
+        return {"value": 10}
+
+    def node_b(state: State) -> State:
+        return {"value": 100}
+
+    graph = (
+        StateGraph(State)
+        .add_node("node_a", node_a)
+        .add_node("node_b", node_b)
+        .add_edge(START, "node_a")
+        .add_edge("node_a", "node_b")
+        .compile(checkpointer=async_checkpointer)
+    )
+
+    thread1 = {"configurable": {"thread_id": "1"}}
+    await graph.ainvoke({"value": 1}, thread1)
+
+    history = [c async for c in graph.aget_state_history(thread1)]
+    checkpoint_before_a = next(s for s in history if s.next == ("node_a",))
+
+    fork_config = await graph.aupdate_state(
+        checkpoint_before_a.config, {"value": 20}, as_node="node_a"
+    )
+    result = await graph.ainvoke(None, fork_config)
+
+    # 1 (input) + 20 (forked node_a) + 100 (node_b) = 121
+    assert result == {"value": 121}
+
+
+@NEEDS_CONTEXTVARS
+async def test_null_resume_disallowed_with_multiple_interrupts(
+    async_checkpointer: BaseCheckpointSaver,
+) -> None:
+    class State(TypedDict):
+        text_1: str
+        text_2: str
+
+    async def human_node_1(state: State):
+        value = interrupt(state["text_1"])
+        return {"text_1": value}
+
+    async def human_node_2(state: State):
+        value = interrupt(state["text_2"])
+        return {"text_2": value}
+
+    graph_builder = StateGraph(State)
+    graph_builder.add_node("human_node_1", human_node_1)
+    graph_builder.add_node("human_node_2", human_node_2)
+
+    # Add both nodes in parallel from START
+    graph_builder.add_edge(START, "human_node_1")
+    graph_builder.add_edge(START, "human_node_2")
+
+    checkpointer = InMemorySaver()
+    graph = graph_builder.compile(checkpointer=checkpointer)
+
+    thread_id = str(uuid.uuid4())
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+    await graph.ainvoke(
+        {"text_1": "original text 1", "text_2": "original text 2"}, config=config
+    )
+
+    resume_map = {
+        i.id: f"resume for prompt: {i.value}"
+        for i in (await graph.aget_state(config)).interrupts
+    }
+    with pytest.raises(
+        RuntimeError,
+        match="When there are multiple pending interrupts, you must specify the interrupt id when resuming.",
+    ):
+        await graph.ainvoke(Command(resume="singular resume"), config=config)
+
+    assert await graph.ainvoke(Command(resume=resume_map), config=config) == {
+        "text_1": "resume for prompt: original text 1",
+        "text_2": "resume for prompt: original text 2",
+    }
+
+
+@NEEDS_CONTEXTVARS
+async def test_interrupt_stream_mode_values(async_checkpointer: BaseCheckpointSaver):
+    """Test that interrupts are surfaced on 'values' stream mode"""
+
+    class State(TypedDict):
+        robot_input: str
+        human_input: str
+
+    def robot_input_node(state: State) -> State:
+        return {"robot_input": "beep boop i am a robot"}
+
+    def human_input_node(state: State) -> Command:
+        human_input = interrupt("interrupt")
+        return Command(update={"human_input": human_input})
+
+    builder = StateGraph(State)
+    builder.add_node(robot_input_node)
+    builder.add_node(human_input_node)
+    builder.add_edge(START, "robot_input_node")
+    builder.add_edge("robot_input_node", "human_input_node")
+    app = builder.compile(checkpointer=async_checkpointer)
+    config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+
+    result = [
+        (mode, e)
+        async for mode, e in app.astream(
+            State(), config, stream_mode=["updates", "values"]
+        )
+    ]
+    assert len(result) == 4
+    assert result == [
+        ("updates", {"robot_input_node": {"robot_input": "beep boop i am a robot"}}),
+        ("values", {"robot_input": "beep boop i am a robot"}),
+        ("updates", {"__interrupt__": (Interrupt(value="interrupt", id=AnyStr()),)}),
+        (
+            "values",
+            {
+                "robot_input": "beep boop i am a robot",
+                "__interrupt__": (Interrupt(value="interrupt", id=AnyStr()),),
+            },
+        ),
+    ]
+    resume_result = [
+        (mode, e)
+        async for mode, e in app.astream(
+            Command(resume="i am a human"), config, stream_mode=["updates", "values"]
+        )
+    ]
+    assert resume_result == [
+        ("values", {"robot_input": "beep boop i am a robot"}),
+        ("updates", {"human_input_node": {"human_input": "i am a human"}}),
+        (
+            "values",
+            {"robot_input": "beep boop i am a robot", "human_input": "i am a human"},
+        ),
     ]
